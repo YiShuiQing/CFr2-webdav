@@ -38,7 +38,7 @@ export function authenticate(request: Request, env: Env): boolean {
   try {
     const binary = atob(match[1]);
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
     const separator = decoded.indexOf(':');
     if (separator <= 0) return false;
 
