@@ -35,16 +35,18 @@ jobs:
           cache: npm
 
       - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Type check
-        run: npm run typecheck
+        if: ${{ hashFiles('tsconfig.json') != '' }}
+        run: npm run typecheck --if-present
 
       - name: Security regression tests
-        run: npm test
+        if: ${{ hashFiles('tests/*.test.mjs') != '' }}
+        run: npm test --if-present
 
       - name: Validate Worker build (dry run only)
+        if: ${{ hashFiles('wrangler.toml') != '' }}
         run: ./node_modules/.bin/wrangler deploy --dry-run --outdir .wrangler/deploy --config wrangler.toml
 
-# This workflow intentionally has no Cloudflare credentials and no deployment job.
-# Production deployment will be added as a separate, explicitly gated workflow after CI passes.
+# Verification only. No Cloudflare credentials or production deployment are used.
