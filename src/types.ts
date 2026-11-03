@@ -17,4 +17,5 @@ export interface WebDAVProps {
   getetag: string | undefined;
   getlastmodified: string;
   resourcetype: string;
+  href?: string;
 }

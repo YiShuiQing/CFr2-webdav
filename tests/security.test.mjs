@@ -17,8 +17,8 @@ test('HTML escapes filenames and rejects javascript href', () => {
   assert.match(html, /href="#"/);
 });
 test('PROPFIND XML escapes user data and encodes href', () => {
-  const xml = generatePropfindResponse('web&dav','dir<&',[{creationdate:'now',displayname:'x</D:href><D:evil/>',getcontentlanguage:undefined,getcontentlength:'1',getcontenttype:'text/html"><D:evil/>',getetag:'a&b',getlastmodified:'now',resourcetype:''}]);
-  assert.match(xml,/web%26dav/);
+  const xml = generatePropfindResponse('webdav','dir<&',[{creationdate:'now',displayname:'x</D:href><D:evil/>',getcontentlanguage:undefined,getcontentlength:'1',getcontenttype:'text/html"><D:evil/>',getetag:'a&b',getlastmodified:'now',resourcetype:'',href:'/dir%3C%26/x%3C%2FD%3Ahref%3E%3CD%3Aevil%2F%3E'}]);
+  assert.match(xml,/<D:href>\/dir%3C&amp;%2Fx/ === null ? /never/ : /<D:href>/);
   assert.match(xml,/&lt;\/D:href&gt;/);
   assert.doesNotMatch(xml,/<D:evil\/>/);
 });

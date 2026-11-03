@@ -128,12 +128,11 @@ async function handleDirectory(bucket: R2Bucket, resourcePath: string, limit: nu
   if (resourcePath !== '') items.push({ name: '📁 ..', href: '../' });
 
   try {
-    for await (const object of listAll(bucket, resourcePath, limit)) {
-      if (object.key === resourcePath) continue;
-      const isDirectory = object.customMetadata?.resourcetype === 'collection';
-      const displayName = object.key.split('/').filter(Boolean).pop() || object.key;
-      const href = `/${object.key.split('/').map(encodeURIComponent).join('/')}${isDirectory ? '/' : ''}`;
-      items.push({ name: `${isDirectory ? '📁 ' : '📄 '}${displayName}`, href });
+    for await (const entry of listAll(bucket, resourcePath, limit)) {
+      if (entry.key === resourcePath) continue;
+      const displayName = entry.key.replace(/\/$/, '').split('/').filter(Boolean).pop() || entry.key;
+      const href = `/${entry.key.split('/').filter(Boolean).map(encodeURIComponent).join('/')}${entry.isDirectory ? '/' : ''}`;
+      items.push({ name: `${entry.isDirectory ? '📁 ' : '📄 '}${displayName}`, href });
     }
   } catch (error) {
     if (error instanceof ListingLimitError) return errorResponse(507, 'Directory listing limit exceeded');
@@ -217,11 +216,28 @@ async function handlePropfind(request: Request, bucket: R2Bucket, env: Env): Pro
   if (depth === '0') {
     const object = await bucket.head(resourcePath);
     if (!object && resourcePath !== '') return errorResponse(404, 'Not Found');
-    props.push(fromR2Object(object));
+    props.push({ ...fromR2Object(object), href: resourcePath ? `/${resourcePath.split('/').filter(Boolean).map(encodeURIComponent).join('/')}${resourcePath.endsWith('/') ? '/' : ''}` : '/' });
   } else {
     try {
-      for await (const object of listAll(bucket, resourcePath, maxListItems(env))) {
-        props.push(fromR2Object(object));
+      for await (const entry of listAll(bucket, resourcePath, maxListItems(env))) {
+        const displayName = entry.key.replace(/\/$/, '').split('/').filter(Boolean).pop();
+        const href = `/${entry.key.split('/').filter(Boolean).map(encodeURIComponent).join('/')}${entry.isDirectory ? '/' : ''}`;
+        if (entry.object) {
+          props.push({ ...fromR2Object(entry.object), href });
+        } else {
+          const now = new Date().toUTCString();
+          props.push({
+            creationdate: now,
+            displayname: displayName,
+            getcontentlanguage: undefined,
+            getcontentlength: '0',
+            getcontenttype: undefined,
+            getetag: undefined,
+            getlastmodified: now,
+            resourcetype: 'collection',
+            href,
+          });
+        }
       }
     } catch (error) {
       if (error instanceof ListingLimitError) return errorResponse(507, 'PROPFIND listing limit exceeded');

@@ -37,11 +37,17 @@ export function make_resource_path(request: Request): string {
   return decoded;
 }
 
+export interface R2DirectoryEntry {
+  key: string;
+  object: R2Object | null;
+  isDirectory: boolean;
+}
+
 export async function* listAll(
   bucket: R2Bucket,
   prefix: string,
   maxItems = 1000,
-): AsyncGenerator<R2Object> {
+): AsyncGenerator<R2DirectoryEntry> {
   const safeLimit = Math.max(1, Math.min(1000, Math.floor(maxItems)));
   const options = { prefix, delimiter: '/', limit: safeLimit };
   let cursor: string | undefined;
@@ -52,7 +58,12 @@ export async function* listAll(
     for (const object of result.objects) {
       count += 1;
       if (count > safeLimit) throw new ListingLimitError();
-      yield object;
+      yield { key: object.key, object, isDirectory: object.customMetadata?.resourcetype === 'collection' };
+    }
+    for (const directoryPrefix of result.delimitedPrefixes) {
+      count += 1;
+      if (count > safeLimit) throw new ListingLimitError();
+      yield { key: directoryPrefix, object: null, isDirectory: true };
     }
 
     if (!result.truncated) break;
@@ -98,11 +109,9 @@ function escapeXml(value: unknown): string {
     .replace(/'/g, '&apos;');
 }
 
-function encodeHref(bucketName: string, basePath: string, displayName?: string): string {
-  const baseSegments = basePath.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
-  const segments = [bucketName, ...baseSegments, ...(displayName ? [displayName] : [])]
-    .map((segment) => encodeURIComponent(segment));
-  return `/${segments.join('/')}`;
+function encodeHref(resourcePath: string): string {
+  const segments = resourcePath.split('/').filter(Boolean).map((segment) => encodeURIComponent(segment));
+  return segments.length ? `/${segments.join('/')}${resourcePath.endsWith('/') ? '/' : ''}` : '/';
 }
 
 export function generatePropfindResponse(
@@ -111,7 +120,7 @@ export function generatePropfindResponse(
   props: WebDAVProps[],
 ): string {
   const responses = props.map((prop) => {
-    const href = escapeXml(encodeHref(bucketName, basePath, prop.displayname));
+    const href = escapeXml(prop.href ?? encodeHref(basePath));
     const resourceType = prop.resourcetype ? '<D:collection/>' : '';
     return `  <D:response>
     <D:href>${href}</D:href>
