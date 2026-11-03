@@ -1,76 +1,137 @@
-// 文件名：src/utils/webdavUtils.ts
-import { R2Object } from '@cloudflare/workers-types';
-import { WebDAVProps } from '../types';
+import type { R2Object } from '@cloudflare/workers-types';
+import type { WebDAVProps } from '../types.js';
 
-export function make_resource_path(request: Request): string {
-  const url = new URL(request.url);
-  return decodeURIComponent(url.pathname.slice(1));
+export class InvalidResourcePathError extends Error {
+  constructor(message = 'Invalid resource path') {
+    super(message);
+    this.name = 'InvalidResourcePathError';
+  }
 }
 
-export async function* listAll(bucket: R2Bucket, prefix: string) {
-  const options = { prefix, delimiter: "/" };
-  let result = await bucket.list(options);
+export class ListingLimitError extends Error {
+  constructor() {
+    super('Directory listing limit exceeded');
+    this.name = 'ListingLimitError';
+  }
+}
 
-  while (result.objects.length > 0) {
+export function make_resource_path(request: Request): string {
+  const pathname = new URL(request.url).pathname.slice(1);
+  if (/%(?:2f|5c)/i.test(pathname)) {
+    throw new InvalidResourcePathError('Encoded path separators are not allowed');
+  }
+
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    throw new InvalidResourcePathError('Malformed URL encoding');
+  }
+
+  if (/[\\\u0000-\u001f\u007f]/.test(decoded)) {
+    throw new InvalidResourcePathError('Control characters and backslashes are not allowed');
+  }
+  if (decoded.split('/').some((segment) => segment === '.' || segment === '..')) {
+    throw new InvalidResourcePathError('Dot path segments are not allowed');
+  }
+  return decoded;
+}
+
+export async function* listAll(
+  bucket: R2Bucket,
+  prefix: string,
+  maxItems = 1000,
+): AsyncGenerator<R2Object> {
+  const safeLimit = Math.max(1, Math.min(1000, Math.floor(maxItems)));
+  const options = { prefix, delimiter: '/', limit: safeLimit };
+  let cursor: string | undefined;
+  let count = 0;
+
+  while (true) {
+    const result = await bucket.list(cursor ? { ...options, cursor } : options);
     for (const object of result.objects) {
+      count += 1;
+      if (count > safeLimit) throw new ListingLimitError();
       yield object;
     }
 
-    if (result.truncated && result.cursor) {
-      result = await bucket.list({ ...options, cursor: result.cursor });
-    } else {
-      break;
-    }
+    if (!result.truncated) break;
+    if (!result.cursor || count >= safeLimit) throw new ListingLimitError();
+    cursor = result.cursor;
   }
 }
 
 export function fromR2Object(object: R2Object | null): WebDAVProps {
   if (!object) {
+    const now = new Date().toUTCString();
     return {
-      creationdate: new Date().toUTCString(),
+      creationdate: now,
       displayname: undefined,
       getcontentlanguage: undefined,
-      getcontentlength: "0",
+      getcontentlength: '0',
       getcontenttype: undefined,
       getetag: undefined,
-      getlastmodified: new Date().toUTCString(),
-      resourcetype: "collection"
+      getlastmodified: now,
+      resourcetype: 'collection',
     };
   }
+
   return {
-    creationdate: object.uploaded.toUTCString(),
-    displayname: object.key.split('/').pop(),
+    creationdate: object.uploaded.toISOString(),
+    displayname: object.key.split('/').filter(Boolean).pop(),
     getcontentlanguage: object.httpMetadata?.contentLanguage,
     getcontentlength: object.size.toString(),
     getcontenttype: object.httpMetadata?.contentType,
     getetag: object.etag,
     getlastmodified: object.uploaded.toUTCString(),
-    resourcetype: object.customMetadata?.resourcetype || ""
+    resourcetype: object.customMetadata?.resourcetype || '',
   };
 }
 
-export function generatePropfindResponse(bucketName: string, basePath: string, props: WebDAVProps[]): string {
-  const responses = props.map(prop => generatePropResponse(bucketName, basePath, prop)).join("\n");
-  return `<?xml version="1.0" encoding="utf-8" ?>
-  <D:multistatus xmlns:D="DAV:">
-${responses}
-  </D:multistatus>`;
+function escapeXml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '\uFFFD')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
-function generatePropResponse(bucketName: string, basePath: string, prop: WebDAVProps): string {
-  const resourcePath = `/${bucketName}/${basePath}${prop.displayname ? '/' + prop.displayname : ''}`;
-  return `  <D:response>
-    <D:href>${resourcePath}</D:href>
+function encodeHref(bucketName: string, basePath: string, displayName?: string): string {
+  const baseSegments = basePath.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+  const segments = [bucketName, ...baseSegments, ...(displayName ? [displayName] : [])]
+    .map((segment) => encodeURIComponent(segment));
+  return `/${segments.join('/')}`;
+}
+
+export function generatePropfindResponse(
+  bucketName: string,
+  basePath: string,
+  props: WebDAVProps[],
+): string {
+  const responses = props.map((prop) => {
+    const href = escapeXml(encodeHref(bucketName, basePath, prop.displayname));
+    const resourceType = prop.resourcetype ? '<D:collection/>' : '';
+    return `  <D:response>
+    <D:href>${href}</D:href>
     <D:propstat>
       <D:prop>
-        <D:creationdate>${prop.creationdate}</D:creationdate>
-        <D:getcontentlength>${prop.getcontentlength}</D:getcontentlength>
-        <D:getcontenttype>${prop.getcontenttype || ''}</D:getcontenttype>
-        <D:getetag>${prop.getetag || ''}</D:getetag>
-        <D:getlastmodified>${prop.getlastmodified}</D:getlastmodified>
-        <D:resourcetype>${prop.resourcetype ? '<D:collection/>' : ''}</D:resourcetype>
+        <D:creationdate>${escapeXml(prop.creationdate)}</D:creationdate>
+        <D:displayname>${escapeXml(prop.displayname)}</D:displayname>
+        <D:getcontentlength>${escapeXml(prop.getcontentlength)}</D:getcontentlength>
+        <D:getcontenttype>${escapeXml(prop.getcontenttype)}</D:getcontenttype>
+        <D:getetag>${escapeXml(prop.getetag)}</D:getetag>
+        <D:getlastmodified>${escapeXml(prop.getlastmodified)}</D:getlastmodified>
+        <D:resourcetype>${resourceType}</D:resourcetype>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>`;
+  }).join('\n');
+
+  return `<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+${responses}
+</D:multistatus>`;
 }

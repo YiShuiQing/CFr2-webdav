@@ -1,14 +1,11 @@
-// 文件名：src/types.ts
 export interface Env {
   BUCKET: R2Bucket;
-  USERNAME: string;
-  PASSWORD: string;
-  BUCKET_NAME: string;
-}
-
-export interface CacheableResponse {
-  response: Response;
-  expiry: number;
+  USERNAME?: string;
+  PASSWORD?: string;
+  BUCKET_NAME?: string;
+  CORS_ORIGINS?: string;
+  MAX_UPLOAD_BYTES?: string;
+  MAX_LIST_ITEMS?: string;
 }
 
 export interface WebDAVProps {

@@ -1,12 +1,13 @@
 name = "cf-r2-webdav"
 main = "src/index.ts"
-compatibility_date = "2023-01-01"
+compatibility_date = "2026-11-03"
+workers_dev = true
 
 [vars]
-USERNAME = "$USERNAME"
-PASSWORD = "$PASSWORD"
-BUCKET_NAME = "$BUCKET_NAME"
+BUCKET_NAME = "webdav"
+MAX_UPLOAD_BYTES = "104857600"
+MAX_LIST_ITEMS = "1000"
 
 [[r2_buckets]]
 binding = "BUCKET"
-bucket_name = "$BUCKET_NAME"
+bucket_name = "webdav"
