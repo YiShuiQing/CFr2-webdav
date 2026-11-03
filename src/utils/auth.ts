@@ -18,9 +18,11 @@ function constantTimeEqual(left: string, right: string): boolean {
 export function isAuthenticationConfigured(env: Env): boolean {
   return Boolean(
     env.USERNAME &&
+    env.USERNAME.length <= 128 &&
     env.PASSWORD &&
-    !env.USERNAME.includes(':') &&
-    env.PASSWORD.length >= 20
+    env.PASSWORD.length >= 20 &&
+    env.PASSWORD.length <= 1024 &&
+    !env.USERNAME.includes(':')
   );
 }
 
@@ -44,10 +46,9 @@ export function authenticate(request: Request, env: Env): boolean {
 
     const username = decoded.slice(0, separator);
     const password = decoded.slice(separator + 1);
-    return (
-      constantTimeEqual(username, env.USERNAME!) &&
-      constantTimeEqual(password, env.PASSWORD!)
-    );
+    const usernameMatches = constantTimeEqual(username, env.USERNAME!);
+    const passwordMatches = constantTimeEqual(password, env.PASSWORD!);
+    return usernameMatches && passwordMatches;
   } catch {
     return false;
   }

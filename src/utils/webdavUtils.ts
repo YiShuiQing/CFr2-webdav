@@ -109,7 +109,7 @@ function escapeXml(value: unknown): string {
     .replace(/'/g, '&apos;');
 }
 
-function encodeHref(resourcePath: string): string {
+export function encodeResourceHref(resourcePath: string): string {
   const segments = resourcePath.split('/').filter(Boolean).map((segment) => encodeURIComponent(segment));
   return segments.length ? `/${segments.join('/')}${resourcePath.endsWith('/') ? '/' : ''}` : '/';
 }
@@ -120,7 +120,7 @@ export function generatePropfindResponse(
   props: WebDAVProps[],
 ): string {
   const responses = props.map((prop) => {
-    const href = escapeXml(prop.href ?? encodeHref(basePath));
+    const href = escapeXml(prop.href ?? encodeResourceHref(basePath));
     const resourceType = prop.resourcetype ? '<D:collection/>' : '';
     return `  <D:response>
     <D:href>${href}</D:href>

@@ -6,12 +6,13 @@ import {
   listAll,
   ListingLimitError,
   make_resource_path,
+  encodeResourceHref,
 } from '../utils/webdavUtils.js';
 import { logger } from '../utils/logger.js';
 import { generateHTML } from '../utils/templates.js';
 import { WEBDAV_METHODS } from '../utils/cors.js';
 
-const DAV_CLASS = '1, 2';
+const DAV_CLASS = '1';
 const DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DEFAULT_MAX_LIST_ITEMS = 1000;
 
@@ -28,7 +29,7 @@ function maxListItems(env: Env): number {
 }
 
 function safeContentType(value: string | undefined): string {
-  if (!value || value.length > 200 || /[\r\n\u0000]/.test(value)) {
+  if (!value || value.length > 200 || /[\u0000-\u001f\u007f]/.test(value)) {
     return 'application/octet-stream';
   }
   return value;
@@ -152,7 +153,7 @@ async function handleDirectory(bucket: R2Bucket, resourcePath: string, limit: nu
 
 async function handlePut(request: Request, bucket: R2Bucket, env: Env): Promise<Response> {
   const resourcePath = make_resource_path(request);
-  if (!resourcePath) return errorResponse(405, 'Cannot upload to the collection root');
+  if (!resourcePath || resourcePath.endsWith('/')) return errorResponse(405, 'Cannot upload to a collection');
 
   const limit = maxUploadBytes(env);
   const contentLength = request.headers.get('Content-Length');
@@ -178,10 +179,13 @@ async function handlePut(request: Request, bucket: R2Bucket, env: Env): Promise<
   let totalBytes = 0;
 
   try {
-    await bucket.put(resourcePath, body, {
+    const existing = await bucket.head(resourcePath);
+    const uploaded = await bucket.put(resourcePath, body, {
+      onlyIf: request.headers,
       httpMetadata: { contentType: safeContentType(request.headers.get('Content-Type') ?? undefined) },
     });
-    return new Response('Created', { status: 201 });
+    if (!uploaded) return errorResponse(412, 'Upload precondition failed');
+    return new Response(null, { status: existing ? 204 : 201 });
   } catch (error) {
     if (exceeded) return errorResponse(413, 'Upload exceeds configured size limit');
     logger.error('Upload failed:', error instanceof Error ? error.message : 'unknown error');
@@ -192,36 +196,90 @@ async function handlePut(request: Request, bucket: R2Bucket, env: Env): Promise<
 async function handleDelete(request: Request, bucket: R2Bucket): Promise<Response> {
   const resourcePath = make_resource_path(request);
   if (!resourcePath) return errorResponse(405, 'Cannot delete the collection root');
+
+  if (request.headers.has('If-Match') || request.headers.has('If-None-Match') ||
+      request.headers.has('If-Unmodified-Since') || request.headers.has('If-Modified-Since')) {
+    return errorResponse(501, 'Conditional DELETE is not supported by the R2 binding');
+  }
+
+  const object = await bucket.head(resourcePath);
+  if (!object) return errorResponse(404, 'Not Found');
+  if (resourcePath.endsWith('/') || object.customMetadata?.resourcetype === 'collection') {
+    return errorResponse(501, 'Collection DELETE is not supported; no objects were deleted');
+  }
+
   await bucket.delete(resourcePath);
   return new Response(null, { status: 204 });
 }
 
+async function hasObjectsWithPrefix(bucket: R2Bucket, prefix: string): Promise<boolean> {
+  const result = await bucket.list({ prefix, limit: 1 });
+  return result.objects.length > 0 || result.truncated;
+}
+
+async function collectionExists(bucket: R2Bucket, path: string): Promise<boolean> {
+  if (!path) return true;
+  const prefix = `${path.replace(/\/+$/, '')}/`;
+  const marker = await bucket.head(prefix);
+  if (marker?.customMetadata?.resourcetype === 'collection') return true;
+  return hasObjectsWithPrefix(bucket, prefix);
+}
+
 async function handleMkcol(request: Request, bucket: R2Bucket): Promise<Response> {
-  const resourcePath = make_resource_path(request).replace(/\/$/, '');
+  const resourcePath = make_resource_path(request).replace(/\/+$/, '');
   if (!resourcePath) return errorResponse(405, 'Cannot create the collection root');
-  const existing = await bucket.head(`${resourcePath}/`);
-  if (existing) return errorResponse(405, 'Collection already exists');
-  await bucket.put(`${resourcePath}/`, new Uint8Array(), {
+
+  const markerPath = `${resourcePath}/`;
+  const [existingFile, existingMarker, hasChildren] = await Promise.all([
+    bucket.head(resourcePath),
+    bucket.head(markerPath),
+    hasObjectsWithPrefix(bucket, markerPath),
+  ]);
+  if (existingFile || existingMarker || hasChildren) {
+    return errorResponse(405, 'The resource or collection already exists');
+  }
+
+  const parentPath = resourcePath.split('/').slice(0, -1).join('/');
+  if (parentPath && !(await collectionExists(bucket, parentPath))) {
+    return errorResponse(409, 'Parent collection does not exist');
+  }
+
+  const created = await bucket.put(markerPath, new Uint8Array(), {
+    onlyIf: new Headers({ 'If-None-Match': '*' }),
     customMetadata: { resourcetype: 'collection' },
   });
-  return new Response('Created', { status: 201 });
+  if (!created) return errorResponse(405, 'Collection already exists');
+  return new Response(null, { status: 201 });
 }
 
 async function handlePropfind(request: Request, bucket: R2Bucket, env: Env): Promise<Response> {
   const resourcePath = make_resource_path(request);
-  const depth = (request.headers.get('Depth') ?? 'infinity').toLowerCase();
+  const depth = (request.headers.get('Depth') ?? 'infinity').trim().toLowerCase();
   if (!['0', '1', 'infinity'].includes(depth)) return errorResponse(400, 'Invalid Depth header');
+  if (depth === 'infinity') return errorResponse(403, 'Depth: infinity is not supported');
 
-  const props = [];
-  if (depth === '0') {
-    const object = await bucket.head(resourcePath);
-    if (!object && resourcePath !== '') return errorResponse(404, 'Not Found');
-    props.push({ ...fromR2Object(object), href: resourcePath ? `/${resourcePath.split('/').filter(Boolean).map(encodeURIComponent).join('/')}${resourcePath.endsWith('/') ? '/' : ''}` : '/' });
-  } else {
+  const object = resourcePath ? await bucket.head(resourcePath) : null;
+  let isCollection = resourcePath === '' || object?.customMetadata?.resourcetype === 'collection';
+  if (!object && resourcePath.endsWith('/')) {
+    isCollection = await hasObjectsWithPrefix(bucket, resourcePath);
+  }
+  if (resourcePath && !object && !isCollection) return errorResponse(404, 'Not Found');
+
+  const props = [{
+    ...fromR2Object(object),
+    resourcetype: isCollection ? 'collection' : (object?.customMetadata?.resourcetype ?? ''),
+    href: encodeResourceHref(resourcePath),
+  }];
+
+  if (depth === '1' && isCollection) {
+    const seen = new Set<string>([encodeResourceHref(resourcePath)]);
     try {
       for await (const entry of listAll(bucket, resourcePath, maxListItems(env))) {
+        if (entry.key === resourcePath) continue;
+        const href = encodeResourceHref(entry.key);
+        if (seen.has(href)) continue;
+        seen.add(href);
         const displayName = entry.key.replace(/\/$/, '').split('/').filter(Boolean).pop();
-        const href = `/${entry.key.split('/').filter(Boolean).map(encodeURIComponent).join('/')}${entry.isDirectory ? '/' : ''}`;
         if (entry.object) {
           props.push({ ...fromR2Object(entry.object), href });
         } else {
@@ -266,8 +324,9 @@ function destinationPath(request: Request): string {
   } catch {
     throw new InvalidResourcePathError('Invalid Destination header');
   }
-  if (destination.origin !== new URL(request.url).origin) {
-    throw new InvalidResourcePathError('Cross-origin COPY/MOVE is not allowed');
+  if (destination.origin !== new URL(request.url).origin ||
+      destination.username || destination.password || destination.search || destination.hash) {
+    throw new InvalidResourcePathError('Invalid or cross-origin COPY/MOVE destination');
   }
   const path = make_resource_path(new Request(destination));
   if (!path) throw new InvalidResourcePathError('Destination cannot be the collection root');
@@ -284,39 +343,36 @@ function overwriteAllowed(request: Request): boolean | null {
 async function handleCopy(request: Request, bucket: R2Bucket): Promise<Response> {
   const sourcePath = make_resource_path(request);
   const targetPath = destinationPath(request);
+  if (!sourcePath) return errorResponse(405, 'Cannot copy the collection root');
+  if (sourcePath.endsWith('/') || targetPath.endsWith('/')) {
+    return errorResponse(501, 'Collection COPY is not supported');
+  }
   if (sourcePath === targetPath) return errorResponse(403, 'Source and destination are identical');
+
   const overwrite = overwriteAllowed(request);
   if (overwrite === null) return errorResponse(400, 'Invalid Overwrite header');
 
   const source = await bucket.get(sourcePath);
   if (!source) return errorResponse(404, 'Source not found');
-  const target = await bucket.head(targetPath);
-  if (target && !overwrite) return errorResponse(412, 'Destination already exists');
+  if (!('body' in source) || !source.body) return errorResponse(412, 'Source precondition failed');
+  if (source.customMetadata?.resourcetype === 'collection') {
+    return errorResponse(501, 'Collection COPY is not supported');
+  }
 
-  await bucket.put(targetPath, source.body, {
+  const existingTarget = await bucket.head(targetPath);
+  const options = {
     httpMetadata: source.httpMetadata,
     customMetadata: source.customMetadata,
-  });
-  return new Response(null, { status: target ? 204 : 201 });
+    ...(!overwrite ? { onlyIf: new Headers({ 'If-None-Match': '*' }) } : {}),
+  };
+  const copied = await bucket.put(targetPath, source.body, options);
+  if (!copied) return errorResponse(412, 'Destination already exists');
+  return new Response(null, { status: existingTarget ? 204 : 201 });
 }
 
-async function handleMove(request: Request, bucket: R2Bucket): Promise<Response> {
+async function handleMove(request: Request, _bucket: R2Bucket): Promise<Response> {
   const sourcePath = make_resource_path(request);
   const targetPath = destinationPath(request);
-  const overwrite = overwriteAllowed(request);
-  if (overwrite === null) return errorResponse(400, 'Invalid Overwrite header');
-
-  const source = await bucket.get(sourcePath);
-  if (!source) return errorResponse(404, 'Source not found');
   if (sourcePath === targetPath) return new Response(null, { status: 204 });
-
-  const target = await bucket.head(targetPath);
-  if (target && !overwrite) return errorResponse(412, 'Destination already exists');
-
-  await bucket.put(targetPath, source.body, {
-    httpMetadata: source.httpMetadata,
-    customMetadata: source.customMetadata,
-  });
-  await bucket.delete(sourcePath);
-  return new Response(null, { status: target ? 204 : 201 });
+  return errorResponse(501, 'MOVE is disabled because the R2 binding cannot conditionally delete a source object');
 }

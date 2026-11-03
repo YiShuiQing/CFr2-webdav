@@ -11,7 +11,8 @@ A WebDAV-compatible Cloudflare Worker backed by the existing R2 bucket named `we
 - PROPFIND XML values are escaped and href path segments URL-encoded.
 - Uploads are streamed with a 100 MiB hard cap. Directory/PROPFIND enumeration is capped at 1,000 objects.
 - Resource paths reject encoded separators, backslashes, control characters, malformed encodings, and dot segments.
-- COPY/MOVE are same-origin only and honor `Overwrite: T/F`. MOVE to the same path is a no-op.
+- COPY is limited to individual files, enforces same-origin destinations, and atomically honors `Overwrite: F`. MOVE is disabled (501) because the Workers R2 binding has no conditional delete operation; collection COPY/DELETE are also rejected rather than partially modifying a directory. `Depth: infinity` is rejected (403); `DAV: 1` is advertised, not Class 2.
+- Conditional PUT requests are enforced atomically by the R2 binding. Conditional DELETE is rejected because the binding does not provide conditional deletes.
 - No distributed IP rate limiter is implemented. Configure Cloudflare rate-limiting/WAF rules on a custom hostname for public exposure; do not assume equivalent WAF controls on the default workers.dev hostname.
 
 ## Existing R2 bucket
@@ -37,7 +38,7 @@ Add repository Actions secrets:
 | `USERNAME` | WebDAV Basic Auth username; cannot contain colon |
 | `PASSWORD` | WebDAV password, minimum 20 characters |
 
-Do not commit credentials or print them in Actions logs. Only pushes to `main` deploy; security branches and pull requests run verification only. First deployment creates the Worker, then stores USERNAME/PASSWORD with `wrangler secret put`. The Worker returns 503 until both are present.
+Do not commit credentials or print them in Actions logs. Current GitHub Actions workflows are verification-only; they do not deploy or require Cloudflare credentials. Production deployment must be added as a separate gated workflow after review. The Worker returns 503 until both USERNAME and PASSWORD are configured as Worker Secrets.
 
 ## Local development
 

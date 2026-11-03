@@ -4,11 +4,14 @@ import { authenticate } from '../.test-dist/src/utils/auth.js';
 import { generateHTML } from '../.test-dist/src/utils/templates.js';
 import { generatePropfindResponse, make_resource_path, InvalidResourcePathError } from '../.test-dist/src/utils/webdavUtils.js';
 import { handleCorsPreflight } from '../.test-dist/src/utils/cors.js';
+import { handleWebDAV } from '../.test-dist/src/handlers/webdavHandler.js';
 
 test('authentication fails closed without strong secrets', () => {
   const request = new Request('https://dav.example/', {headers:{Authorization:'Basic dXNlcjpwYXNz'}});
   assert.equal(authenticate(request, {BUCKET:{}}), false);
   assert.equal(authenticate(request, {USERNAME:'user', PASSWORD:'short', BUCKET:{}}), false);
+  const valid = new Request('https://dav.example/', {headers:{Authorization:'Basic '+btoa('user:12345678901234567890')}});
+  assert.equal(authenticate(valid, {USERNAME:'user', PASSWORD:'12345678901234567890', BUCKET:{}}), true);
 });
 test('HTML escapes filenames and rejects javascript href', () => {
   const html = generateHTML('<script>x</script>', [{name:'<img src=x>',href:'javascript:alert(1)'}]);
@@ -16,15 +19,16 @@ test('HTML escapes filenames and rejects javascript href', () => {
   assert.match(html, /&lt;img/);
   assert.match(html, /href="#"/);
 });
-test('PROPFIND XML escapes user data and encodes href', () => {
+test('PROPFIND XML escapes untrusted values and emits an encoded href', () => {
   const xml = generatePropfindResponse('webdav','dir<&',[{creationdate:'now',displayname:'x</D:href><D:evil/>',getcontentlanguage:undefined,getcontentlength:'1',getcontenttype:'text/html"><D:evil/>',getetag:'a&b',getlastmodified:'now',resourcetype:'',href:'/dir%3C%26/x%3C%2FD%3Ahref%3E%3CD%3Aevil%2F%3E'}]);
   assert.ok(xml.includes('<D:href>/dir%3C%26/x'));
   assert.match(xml,/&lt;\/D:href&gt;/);
   assert.doesNotMatch(xml,/<D:evil\/>/);
 });
-test('path rejects encoded separators and controls', () => {
+test('path rejects encoded separators, controls and dot segments', () => {
   assert.throws(()=>make_resource_path(new Request('https://dav.example/a%2fb')),InvalidResourcePathError);
   assert.throws(()=>make_resource_path(new Request('https://dav.example/a%00b')),InvalidResourcePathError);
+  assert.throws(()=>make_resource_path(new Request('https://dav.example/%2e%2e/secret')),InvalidResourcePathError);
 });
 test('CORS rejects arbitrary origins and allows exact configured origins', () => {
   const bad = new Request('https://dav.example/',{method:'OPTIONS',headers:{Origin:'https://evil.example'}});
@@ -33,4 +37,96 @@ test('CORS rejects arbitrary origins and allows exact configured origins', () =>
   const response=handleCorsPreflight(good,{CORS_ORIGINS:'https://client.example'});
   assert.equal(response?.status,204);
   assert.equal(response?.headers.get('Access-Control-Allow-Credentials'),null);
+});
+
+function makeObject(key, customMetadata = {}) {
+  return {
+    key, size: 1, etag: 'etag', httpEtag: '"etag"',
+    uploaded: new Date('2026-01-01T00:00:00Z'),
+    httpMetadata: { contentType: 'text/plain' }, customMetadata,
+    body: new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1])); controller.close(); } }),
+  };
+}
+function mockBucket(overrides = {}) {
+  const calls = [];
+  return {
+    calls,
+    head: async (key) => overrides.head ? overrides.head(key) : null,
+    get: async (key, options) => overrides.get ? overrides.get(key, options) : null,
+    put: async (key, value, options) => {
+      calls.push({method:'put', key, options});
+      return overrides.put ? overrides.put(key, value, options) : makeObject(key);
+    },
+    delete: async (key) => { calls.push({method:'delete', key}); },
+    list: async (options) => overrides.list ? overrides.list(options) : ({objects:[],delimitedPrefixes:[],truncated:false}),
+  };
+}
+const envFor = (bucket) => ({ BUCKET: bucket, BUCKET_NAME: 'webdav' });
+
+test('OPTIONS advertises DAV Class 1 only and does not claim MOVE support', async () => {
+  const response = await handleWebDAV(new Request('https://dav.example/', {method:'OPTIONS'}), envFor(mockBucket()));
+  assert.equal(response.headers.get('DAV'), '1');
+  assert.doesNotMatch(response.headers.get('Allow') || '', /MOVE|LOCK|UNLOCK/);
+});
+test('PROPFIND rejects Depth infinity instead of silently returning a shallow listing', async () => {
+  const bucket = mockBucket();
+  const response = await handleWebDAV(new Request('https://dav.example/', {method:'PROPFIND',headers:{Depth:'infinity'}}), envFor(bucket));
+  assert.equal(response.status, 403);
+  assert.equal(bucket.calls.length, 0);
+});
+test('MKCOL refuses to create a collection without its parent', async () => {
+  const bucket = mockBucket();
+  const response = await handleWebDAV(new Request('https://dav.example/a/b/', {method:'MKCOL'}), envFor(bucket));
+  assert.equal(response.status, 409);
+  assert.equal(bucket.calls.filter(x=>x.method==='put').length, 0);
+});
+test('MKCOL creates only if the marker does not already exist', async () => {
+  const bucket = mockBucket();
+  const response = await handleWebDAV(new Request('https://dav.example/new-dir/', {method:'MKCOL'}), envFor(bucket));
+  assert.equal(response.status, 201);
+  const put = bucket.calls.find(x=>x.method==='put');
+  assert.equal(put.key, 'new-dir/');
+  assert.equal(put.options.onlyIf.get('If-None-Match'), '*');
+});
+test('PUT forwards HTTP preconditions to atomic R2 write and returns 412 on failure', async () => {
+  const bucket = mockBucket({put: async () => null});
+  const response = await handleWebDAV(new Request('https://dav.example/file.txt', {method:'PUT',headers:{'If-None-Match':'*'},body:'data'}), envFor(bucket));
+  assert.equal(response.status, 412);
+  const put = bucket.calls.find(x=>x.method==='put');
+  assert.equal(put.options.onlyIf.get('If-None-Match'), '*');
+});
+test('COPY Overwrite F uses an atomic no-overwrite condition', async () => {
+  const source = makeObject('source.txt');
+  const bucket = mockBucket({
+    get: async () => source,
+    put: async () => null,
+  });
+  const response = await handleWebDAV(new Request('https://dav.example/source.txt', {method:'COPY',headers:{Destination:'https://dav.example/target.txt',Overwrite:'F'}}), envFor(bucket));
+  assert.equal(response.status, 412);
+  const put = bucket.calls.find(x=>x.method==='put');
+  assert.equal(put.options.onlyIf.get('If-None-Match'), '*');
+});
+test('MOVE is explicitly disabled and does not alter R2 objects', async () => {
+  const bucket = mockBucket();
+  const response = await handleWebDAV(new Request('https://dav.example/source.txt', {method:'MOVE',headers:{Destination:'https://dav.example/target.txt'}}), envFor(bucket));
+  assert.equal(response.status, 501);
+  assert.equal(bucket.calls.length, 0);
+});
+test('DELETE refuses collection markers instead of deleting only the marker', async () => {
+  const bucket = mockBucket({head: async () => makeObject('folder/', {resourcetype:'collection'})});
+  const response = await handleWebDAV(new Request('https://dav.example/folder/', {method:'DELETE'}), envFor(bucket));
+  assert.equal(response.status, 501);
+  assert.equal(bucket.calls.length, 0);
+});
+test('DELETE returns 404 for missing objects', async () => {
+  const bucket = mockBucket();
+  const response = await handleWebDAV(new Request('https://dav.example/missing.txt', {method:'DELETE'}), envFor(bucket));
+  assert.equal(response.status, 404);
+  assert.equal(bucket.calls.length, 0);
+});
+test('conditional DELETE is rejected rather than silently ignoring If-Match', async () => {
+  const bucket = mockBucket({head: async () => makeObject('file.txt')});
+  const response = await handleWebDAV(new Request('https://dav.example/file.txt', {method:'DELETE',headers:{'If-Match':'"etag"'}}), envFor(bucket));
+  assert.equal(response.status, 501);
+  assert.equal(bucket.calls.length, 0);
 });

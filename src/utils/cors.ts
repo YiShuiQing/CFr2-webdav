@@ -1,7 +1,7 @@
 import type { Env } from '../types.js';
 
 export const WEBDAV_METHODS = [
-  'OPTIONS', 'PROPFIND', 'MKCOL', 'GET', 'HEAD', 'PUT', 'COPY', 'MOVE', 'DELETE',
+  'OPTIONS', 'PROPFIND', 'MKCOL', 'GET', 'HEAD', 'PUT', 'COPY', 'DELETE',
 ];
 
 const ALLOWED_HEADERS = [
