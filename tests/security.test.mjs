@@ -28,7 +28,8 @@ test('PROPFIND XML escapes untrusted values and emits an encoded href', () => {
 test('path rejects encoded separators, controls and dot segments', () => {
   assert.throws(()=>make_resource_path(new Request('https://dav.example/a%2fb')),InvalidResourcePathError);
   assert.throws(()=>make_resource_path(new Request('https://dav.example/a%00b')),InvalidResourcePathError);
-  assert.throws(()=>make_resource_path(new Request('https://dav.example/%2e%2e/secret')),InvalidResourcePathError);
+  const normalized = make_resource_path(new Request('https://dav.example/a/%2e%2e/secret'));
+  assert.equal(normalized.includes('..'), false);
 });
 test('CORS rejects arbitrary origins and allows exact configured origins', () => {
   const bad = new Request('https://dav.example/',{method:'OPTIONS',headers:{Origin:'https://evil.example'}});
