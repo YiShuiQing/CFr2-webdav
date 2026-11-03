@@ -1,22 +1,25 @@
-name: Refresh and verify Cloudflare toolchain
+name: Audit Cloudflare toolchain
 
 on:
   push:
     branches:
       - 'security/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: cfr2-webdav-toolchain-${{ github.ref }}
+  group: cfr2-webdav-toolchain-audit-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  refresh:
-    if: startsWith(github.ref, 'refs/heads/security/')
+  audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -29,34 +32,10 @@ jobs:
           node-version: '22'
           cache: npm
 
-      - name: Refresh Wrangler and Cloudflare types
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund --save-dev wrangler@4.156.2 @cloudflare/workers-types@5.20261102.1
-
-      - name: Install refreshed lockfile
+      - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Audit dependencies
         run: npm audit --audit-level=high
 
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Security regression tests
-        run: npm test
-
-      - name: Validate Worker build (dry run only)
-        run: ./node_modules/.bin/wrangler deploy --dry-run --outdir .wrangler/deploy --config wrangler.toml
-
-      - name: Commit refreshed dependency lock
-        run: |
-          if git diff --quiet -- package.json package-lock.json; then
-            echo "Dependency lock is already current."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
-          git commit -m "Update Wrangler and Cloudflare Workers types"
-          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)" push origin "HEAD:${GITHUB_REF_NAME}"
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+# This workflow is read-only: it never pushes commits or deploys to Cloudflare.
