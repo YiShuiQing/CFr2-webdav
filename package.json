@@ -11,9 +11,9 @@
     "test": "npm run build:test && node --test tests/*.test.mjs && rm -rf .test-dist"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20231121.0",
+    "@cloudflare/workers-types": "^5.20261102.1",
     "prettier": "3.1.1",
     "typescript": "^5.0.4",
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.156.2"
   }
 }
