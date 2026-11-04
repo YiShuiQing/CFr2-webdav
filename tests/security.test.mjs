@@ -143,7 +143,7 @@ test('R2 directory listing requests custom metadata and de-duplicates prefixes',
   };
   const entries = [];
   for await (const entry of listAll(bucket, '', 10)) entries.push(entry);
-  assert.deepEqual(receivedOptions.include, ['customMetadata']);
+  assert.deepEqual(receivedOptions.include, ['httpMetadata', 'customMetadata']);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].key, 'folder/');
   assert.equal(entries[0].isDirectory, true);
@@ -169,8 +169,8 @@ test('DELETE detects an implicit collection and refuses partial deletion', async
 test('legacy directory marker without custom metadata is classified as a collection', async () => {
   const marker = makeObject('legacy-folder/');
   const bucket = {
-    list: async (options) => ({
-      objects: options.prefix === 'legacy-folder/' ? [marker] : [],
+    list: async () => ({
+      objects: [marker],
       delimitedPrefixes: [],
       truncated: false,
     }),
