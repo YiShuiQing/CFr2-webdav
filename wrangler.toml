@@ -11,3 +11,11 @@ MAX_LIST_ITEMS = "1000"
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "webdav"
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+
