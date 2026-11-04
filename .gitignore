@@ -170,3 +170,7 @@ dist
 
 .dev.vars
 .wrangler/
+# Local secrets and test output
+.env.*
+!.env.example
+.test-dist/

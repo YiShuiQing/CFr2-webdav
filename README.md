@@ -1,112 +1,49 @@
-# Cloudflare R2 WebDAV Server
+# Cloudflare R2 WebDAV (security-hardened fork)
 
-这个项目实现了一个基于 Cloudflare Workers 和 R2 存储的 WebDAV 服务器。它允许用户通过 WebDAV 协议访问和管理存储在 Cloudflare R2 中的文件和目录。
+A WebDAV-compatible Cloudflare Worker backed by the existing R2 bucket named `webdav`.
 
-[R2免费额度](https://developers.cloudflare.com/r2/pricing/)  [视频教程](https://www.bilibili.com/video/BV1mh4peNECe/)
+## Security behavior
 
-![部署Cloudflare R2 WebDAV服务，超简单拥有自己的私人网盘](https://raw.githubusercontent.com/aigem/CFr2-webdav/main/%E5%85%8D%E8%B4%B9%E4%B8%80%E9%94%AE%E9%83%A8%E7%BD%B2Cloudflare%20R2%20WebDAV%E6%9C%8D%E5%8A%A1%EF%BC%8C%E8%B6%85%E7%AE%80%E5%8D%95%E6%8B%A5%E6%9C%89%E8%87%AA%E5%B7%B1%E7%9A%84%E7%A7%81%E4%BA%BA%E7%BD%91%E7%9B%98-%E5%B0%81%E9%9D%A2.jpg)
+- `USERNAME` and `PASSWORD` are mandatory Worker Secrets; no default credentials. Missing or invalid configuration fails closed with HTTP 503.
+- Cross-origin browser access is disabled by default. If required, set `CORS_ORIGINS` to exact comma-separated HTTPS origins. Wildcards are unsupported.
+- Unapproved Origin headers are rejected. CORS never reflects arbitrary origins and does not enable credential cookies.
+- Directory HTML escapes untrusted names and links. File GET/HEAD responses use attachment disposition, `nosniff`, and private/no-store caching.
+- PROPFIND XML values are escaped and href path segments URL-encoded.
+- Uploads are streamed with a 100 MiB hard cap. Directory/PROPFIND enumeration requests R2 HTTP and custom metadata, recognizes both explicit and implicit directories, and is capped at 1,000 entries.
+- Resource paths reject encoded separators, backslashes, control characters, malformed encodings, and dot segments.
+- COPY is limited to individual files, enforces same-origin destinations, and atomically honors `Overwrite: F`. MOVE is disabled (501) because the Workers R2 binding has no conditional delete operation; collection COPY/DELETE are also rejected rather than partially modifying a directory. `Depth: infinity` is rejected (403); `DAV: 1` is advertised, not Class 2.
+- Conditional PUT requests are enforced atomically by the R2 binding. Conditional DELETE is rejected because the binding does not provide conditional deletes.
+- No distributed IP rate limiter is implemented. Configure Cloudflare rate-limiting/WAF rules on a custom hostname for public exposure; do not assume equivalent WAF controls on the default workers.dev hostname.
 
+## Existing R2 bucket
 
-## 特性
+The Wrangler configuration binds the existing bucket:
 
-- 完全兼容 WebDAV 协议
-- 基于 Cloudflare Workers，无需管理服务器
-- 使用 Cloudflare R2 作为存储后端（免费额度慷慨）
-- 支持基本的身份验证
-- 支持文件上传、下载、删除、移动和复制操作
-- 支持目录创建和列表
-
-## 一键部署到 Cloudflare Workers
-
-点击下面的按钮，一键将此项目部署到您的Cloudflare Workers账户：
-
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aigem/CFr2-webdav)
-
-注需要有Cloudflare账户才能使用此功能。如果您还没有账户，可以在[Cloudflare官www.cloudflare.com)注册。
-
-## 手动部署步骤 [Githut Actions]
-
-如果您需要自定义配置或想要深入了解部署流程，请按以下步骤操作：
-
-### 前提条件
-
-- Cloudflare 账户
-- 已创建的 R2 存储桶
-- GitHub 账户
-
-### 步骤 1: 配置 Cloudflare
-
-1. 【获取API令牌】在 Cloudflare 仪表板中，创建一个新的 API 令牌，确保它有足够的权限来管理编辑Workers(和 R2)。
-2. 【获取桶名称】创建的 R2 存储桶
-
-### 步骤 2: 准备仓库
-
-Fork 这个仓库到您的 GitHub 账户。
-```
-https://github.com/aigem/CFr2-webdav
+```toml
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "webdav"
 ```
 
-### 步骤 3: 配置 GitHub Secrets
+Deployment does not create, empty, migrate, or delete the bucket or its objects. Worker script name: `cf-r2-webdav`.
 
-在您的 GitHub 仓库中，转到 Settings -> Secrets and variables -> Actions，添加以下 secrets：
+## GitHub Actions secrets
 
-- `CLOUDFLARE_API_TOKEN`: 步骤1的 Cloudflare API 令牌 (必须)
-- `USERNAME`: WebDAV 服务器的用户名 （可选，默认为 _user）
-- `PASSWORD`: WebDAV 服务器的密码 （可选，默认为 _pass）
-- `BUCKET_NAME`: 的 R2 存储桶名称 （可选，默认为 bucket 如果与你实际的bucket不符，则GithubAction部署会失败）
+Add repository Actions secrets:
 
-### 步骤 4: 配置 GitHub Actions
+| Secret | Purpose |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | Scoped Cloudflare API token |
+| `CLOUDFLARE_ACCOUNT_ID` | Target account ID |
+| `USERNAME` | WebDAV Basic Auth username; cannot contain colon |
+| `PASSWORD` | WebDAV password, minimum 20 characters |
 
-1. 在您的 GitHub 仓库设置中，启用 GitHub Actions。
-2. workflow 文件已经存在，请选择： .github/workflow/main.yml
+Do not commit credentials or print them in Actions logs. The `Deploy to Cloudflare Workers` workflow is manual-only, runs from `main`, and requires an explicit production confirmation. It deploys the Worker, then writes `USERNAME` and `PASSWORD` as Worker Secrets. Configure the GitHub `production` environment with required reviewers before using it. Verification workflows and pull requests never deploy. The Worker returns 503 until both credentials are configured as Worker Secrets.
 
-### 步骤 6: 触发部署
+## Local development
 
-按上面操作完成后就会自动进行部署到CF Worker中，或将任何更改推送到 GitHub 仓库的 `main` 分支，或者手动运行 GitHub Actions 工作流。GitHub Actions 将自动触发部署流程。
+Run `npm ci`, `npm run typecheck`, and `npm test`. For local development, place credentials in an untracked `.dev.vars` file.
 
-您可以在 GitHub 仓库的 Actions 标签页中查看部署进度。部署成功后，您可以在 Cloudflare Workers 仪表板中找到您的 Worker URL。
+## Limits
 
-## 使用方法
-
-使用任何支持 WebDAV 协议的客到您的 Worker URL，使用配置的用户名和密码进行身份验证。
-
-
-## 本地开发（可选）
-
-如果您需要在本地进行开发和测试，请按以下步骤操作：
-
-0. 同上面步骤1 ：配置 Cloudflare
-
-1. 克隆仓库到本地：
-   ```bash
-   git clone https://github.com/aigem/CFr2-webdav.git
-   cd cf-r2-webdav
-   ```
-
-2. 安装依赖：
-   ```bash
-   npm install
-   ```
-
-3. 修改wrangler.toml.template为wrangler.toml文件，并修改为你的实际参数：
-  
-4. 使用 Wrangler 进行本地开发：
-   ```bash
-   npx wrangler dev --local
-   ```
-
-注意：本地开发可能无法完全模拟 Cloudflare Workers 环境，特别是 R2 存储的操作。
-
-## 注意事项
-
-- 确保妥善保管您的 API 令牌和其他敏感信息。
-- 定期更新您的依赖以确保安全性。
-- 遵守 Cloudflare 的使用政策和条款。
-
-## 贡献
-
-欢迎提交 Pull Requests 或创建 Issues 来改进这个项目。
-
-## 许可证
-
-本项目采用 MIT 许可证。
+`MAX_UPLOAD_BYTES` and `MAX_LIST_ITEMS` can lower defaults. Hard maximums are 100 MiB and 1,000 objects.

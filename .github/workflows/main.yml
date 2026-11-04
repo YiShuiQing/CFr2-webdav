@@ -38,15 +38,12 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: Type check
-        if: ${{ hashFiles('tsconfig.json') != '' }}
-        run: npm run typecheck --if-present
+        run: npm run typecheck
 
       - name: Security regression tests
-        if: ${{ hashFiles('tests/*.test.mjs') != '' }}
-        run: npm test --if-present
+        run: npm test
 
       - name: Validate Worker build (dry run only)
-        if: ${{ hashFiles('wrangler.toml') != '' }}
         run: ./node_modules/.bin/wrangler deploy --dry-run --outdir .wrangler/deploy --config wrangler.toml
 
 # Verification only. No Cloudflare credentials or production deployment are used.
