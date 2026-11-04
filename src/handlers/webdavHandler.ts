@@ -262,29 +262,35 @@ async function handlePropfind(request: Request, bucket: R2Bucket, env: Env): Pro
   if (depth === 'infinity') return errorResponse(403, 'Depth: infinity is not supported');
 
   const object = resourcePath ? await bucket.head(resourcePath) : null;
-  let isCollection = resourcePath === '' || object?.customMetadata?.resourcetype === 'collection';
-  if (!object && resourcePath.endsWith('/')) {
-    isCollection = await hasObjectsWithPrefix(bucket, resourcePath);
+  const collectionPath = resourcePath ? `${resourcePath.replace(/\/+$/, '')}/` : '';
+  let isCollection = resourcePath === '' || Boolean(
+    object && (object.key.endsWith('/') || object.customMetadata?.resourcetype === 'collection'),
+  );
+  if (!object && resourcePath) {
+    isCollection = await hasObjectsWithPrefix(bucket, collectionPath);
   }
   if (resourcePath && !object && !isCollection) return errorResponse(404, 'Not Found');
 
+  const responsePath = isCollection && resourcePath ? collectionPath : resourcePath;
   const props = [{
     ...fromR2Object(object),
     resourcetype: isCollection ? 'collection' : (object?.customMetadata?.resourcetype ?? ''),
-    href: encodeResourceHref(resourcePath),
+    href: encodeResourceHref(responsePath),
   }];
 
   if (depth === '1' && isCollection) {
-    const seen = new Set<string>([encodeResourceHref(resourcePath)]);
+    const seen = new Set<string>([encodeResourceHref(responsePath)]);
     try {
-      for await (const entry of listAll(bucket, resourcePath, maxListItems(env))) {
-        if (entry.key === resourcePath) continue;
+      for await (const entry of listAll(bucket, responsePath, maxListItems(env))) {
+        if (entry.key === responsePath) continue;
         const href = encodeResourceHref(entry.key);
         if (seen.has(href)) continue;
         seen.add(href);
         const displayName = entry.key.replace(/\/$/, '').split('/').filter(Boolean).pop();
         if (entry.object) {
-          props.push({ ...fromR2Object(entry.object), href });
+          const childProps = fromR2Object(entry.object);
+          if (entry.isDirectory) childProps.resourcetype = 'collection';
+          props.push({ ...childProps, href });
         } else {
           const now = new Date().toUTCString();
           props.push({
@@ -356,10 +362,18 @@ async function handleCopy(request: Request, bucket: R2Bucket): Promise<Response>
   if (overwrite === null) return errorResponse(400, 'Invalid Overwrite header');
 
   const source = await bucket.get(sourcePath);
-  if (!source) return errorResponse(404, 'Source not found');
+  if (!source) {
+    if (await collectionExists(bucket, sourcePath)) {
+      return errorResponse(501, 'Collection COPY is not supported');
+    }
+    return errorResponse(404, 'Source not found');
+  }
   if (!('body' in source) || !source.body) return errorResponse(412, 'Source precondition failed');
-  if (source.customMetadata?.resourcetype === 'collection') {
+  if (source.key.endsWith('/') || source.customMetadata?.resourcetype === 'collection') {
     return errorResponse(501, 'Collection COPY is not supported');
+  }
+  if (await collectionExists(bucket, targetPath)) {
+    return errorResponse(409, 'Destination is a collection');
   }
 
   const existingTarget = await bucket.head(targetPath);

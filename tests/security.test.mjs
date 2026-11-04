@@ -165,3 +165,48 @@ test('DELETE detects an implicit collection and refuses partial deletion', async
   assert.equal(response.status, 501);
   assert.equal(bucket.calls.length, 0);
 });
+
+test('legacy directory marker without custom metadata is classified as a collection', async () => {
+  const marker = makeObject('legacy-folder/');
+  const bucket = {
+    list: async (options) => ({
+      objects: options.prefix === 'legacy-folder/' ? [marker] : [],
+      delimitedPrefixes: [],
+      truncated: false,
+    }),
+  };
+  const entries = [];
+  for await (const entry of listAll(bucket, '', 10)) entries.push(entry);
+  assert.equal(entries[0].isDirectory, true);
+  assert.deepEqual(entries[0].object.customMetadata, {});
+});
+test('PROPFIND recognizes legacy marker objects and exposes their child files', async () => {
+  const marker = makeObject('legacy-folder/');
+  const child = makeObject('legacy-folder/file.txt');
+  const bucket = mockBucket({
+    head: async (key) => key === 'legacy-folder/' ? marker : null,
+    list: async (options) => options.prefix === 'legacy-folder/'
+      ? ({objects:[marker,child],delimitedPrefixes:[],truncated:false})
+      : ({objects:[],delimitedPrefixes:[],truncated:false}),
+  });
+  const response = await handleWebDAV(new Request('https://dav.example/legacy-folder/', {method:'PROPFIND',headers:{Depth:'1'}}), envFor(bucket));
+  assert.equal(response.status, 207);
+  const xml = await response.text();
+  assert.match(xml, /<D:href>\/legacy-folder\/<\/D:href>/);
+  assert.match(xml, /<D:href>\/legacy-folder\/file.txt<\/D:href>/);
+  assert.match(xml, /<D:resourcetype><D:collection\/><\/D:resourcetype>/);
+});
+test('PROPFIND resolves implicit collection requested without trailing slash', async () => {
+  const child = makeObject('implicit-folder/file.txt');
+  const bucket = mockBucket({
+    head: async () => null,
+    list: async (options) => options.prefix === 'implicit-folder/'
+      ? ({objects:[child],delimitedPrefixes:[],truncated:false})
+      : ({objects:[],delimitedPrefixes:[],truncated:false}),
+  });
+  const response = await handleWebDAV(new Request('https://dav.example/implicit-folder', {method:'PROPFIND',headers:{Depth:'1'}}), envFor(bucket));
+  assert.equal(response.status, 207);
+  const xml = await response.text();
+  assert.match(xml, /<D:href>\/implicit-folder\/<\/D:href>/);
+  assert.match(xml, /implicit-folder\/file.txt/);
+});

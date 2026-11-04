@@ -49,7 +49,7 @@ export async function* listAll(
   maxItems = 1000,
 ): AsyncGenerator<R2DirectoryEntry> {
   const safeLimit = Math.max(1, Math.min(1000, Math.floor(maxItems)));
-  const options = { prefix, delimiter: '/', limit: safeLimit, include: ['customMetadata'] as ['customMetadata'] };
+  const options = { prefix, delimiter: '/', limit: safeLimit, include: ['httpMetadata', 'customMetadata'] as ['httpMetadata', 'customMetadata'] };
   let cursor: string | undefined;
   let count = 0;
   const seen = new Set<string>();
@@ -61,7 +61,7 @@ export async function* listAll(
       seen.add(object.key);
       count += 1;
       if (count > safeLimit) throw new ListingLimitError();
-      yield { key: object.key, object, isDirectory: object.customMetadata?.resourcetype === 'collection' };
+      yield { key: object.key, object, isDirectory: object.key.endsWith('/') || object.customMetadata?.resourcetype === 'collection' };
     }
     for (const directoryPrefix of result.delimitedPrefixes) {
       if (seen.has(directoryPrefix)) continue;
@@ -100,7 +100,7 @@ export function fromR2Object(object: R2Object | null): WebDAVProps {
     getcontenttype: object.httpMetadata?.contentType,
     getetag: object.httpEtag,
     getlastmodified: object.uploaded.toUTCString(),
-    resourcetype: object.customMetadata?.resourcetype || '',
+    resourcetype: object.key.endsWith('/') || object.customMetadata?.resourcetype === 'collection' ? 'collection' : '',
   };
 }
 

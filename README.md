@@ -9,7 +9,7 @@ A WebDAV-compatible Cloudflare Worker backed by the existing R2 bucket named `we
 - Unapproved Origin headers are rejected. CORS never reflects arbitrary origins and does not enable credential cookies.
 - Directory HTML escapes untrusted names and links. File GET/HEAD responses use attachment disposition, `nosniff`, and private/no-store caching.
 - PROPFIND XML values are escaped and href path segments URL-encoded.
-- Uploads are streamed with a 100 MiB hard cap. Directory/PROPFIND enumeration is capped at 1,000 objects.
+- Uploads are streamed with a 100 MiB hard cap. Directory/PROPFIND enumeration requests R2 HTTP and custom metadata, recognizes both explicit and implicit directories, and is capped at 1,000 entries.
 - Resource paths reject encoded separators, backslashes, control characters, malformed encodings, and dot segments.
 - COPY is limited to individual files, enforces same-origin destinations, and atomically honors `Overwrite: F`. MOVE is disabled (501) because the Workers R2 binding has no conditional delete operation; collection COPY/DELETE are also rejected rather than partially modifying a directory. `Depth: infinity` is rejected (403); `DAV: 1` is advertised, not Class 2.
 - Conditional PUT requests are enforced atomically by the R2 binding. Conditional DELETE is rejected because the binding does not provide conditional deletes.
@@ -38,7 +38,7 @@ Add repository Actions secrets:
 | `USERNAME` | WebDAV Basic Auth username; cannot contain colon |
 | `PASSWORD` | WebDAV password, minimum 20 characters |
 
-Do not commit credentials or print them in Actions logs. Current GitHub Actions workflows are verification-only; they do not deploy or require Cloudflare credentials. Production deployment must be added as a separate gated workflow after review. The Worker returns 503 until both USERNAME and PASSWORD are configured as Worker Secrets.
+Do not commit credentials or print them in Actions logs. The `Deploy to Cloudflare Workers` workflow is manual-only, runs from `main`, and requires an explicit production confirmation. It deploys the Worker, then writes `USERNAME` and `PASSWORD` as Worker Secrets. Configure the GitHub `production` environment with required reviewers before using it. Verification workflows and pull requests never deploy. The Worker returns 503 until both credentials are configured as Worker Secrets.
 
 ## Local development
 
