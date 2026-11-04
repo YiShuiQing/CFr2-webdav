@@ -91,10 +91,50 @@ test('MKCOL creates only if the marker does not already exist', async () => {
 });
 test('PUT forwards HTTP preconditions to atomic R2 write and returns 412 on failure', async () => {
   const bucket = mockBucket({put: async () => null});
-  const response = await handleWebDAV(new Request('https://dav.example/file.txt', {method:'PUT',headers:{'If-None-Match':'*'},body:'data'}), envFor(bucket));
+  const response = await handleWebDAV(new Request('https://dav.example/file.txt', {method:'PUT',headers:{'If-None-Match':'*','Content-Length':'4'},body:'data'}), envFor(bucket));
   assert.equal(response.status, 412);
   const put = bucket.calls.find(x=>x.method==='put');
   assert.equal(put.options.onlyIf.get('If-None-Match'), '*');
+});
+test('PUT passes the original known-length request stream to R2 without wrapping it', async () => {
+  const request = new Request('https://dav.example/upload.txt', {
+    method: 'PUT',
+    headers: { 'Content-Length': '4', 'Content-Type': 'text/plain' },
+    body: 'data',
+  });
+  const originalBody = request.body;
+  let receivedBody;
+  const bucket = mockBucket({
+    put: async (_key, value) => {
+      receivedBody = value;
+      return makeObject('upload.txt');
+    },
+  });
+  const response = await handleWebDAV(request, envFor(bucket));
+  assert.equal(response.status, 201);
+  assert.equal(receivedBody, originalBody);
+});
+test('PUT rejects unknown-length streams with 411 before calling R2', async () => {
+  const request = new Request('https://dav.example/upload.txt', {
+    method: 'PUT',
+    body: 'data',
+  });
+  assert.equal(request.headers.get('Content-Length'), null);
+  const bucket = mockBucket();
+  const response = await handleWebDAV(request, envFor(bucket));
+  assert.equal(response.status, 411);
+  assert.equal(bucket.calls.length, 0);
+});
+test('PUT rejects oversized uploads from Content-Length before calling R2', async () => {
+  const request = new Request('https://dav.example/large.bin', {
+    method: 'PUT',
+    headers: { 'Content-Length': '101' },
+    body: 'x'.repeat(101),
+  });
+  const bucket = mockBucket();
+  const response = await handleWebDAV(request, { ...envFor(bucket), MAX_UPLOAD_BYTES: '100' });
+  assert.equal(response.status, 413);
+  assert.equal(bucket.calls.length, 0);
 });
 test('COPY Overwrite F uses an atomic no-overwrite condition', async () => {
   const source = makeObject('source.txt');
