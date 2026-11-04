@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authenticate } from '../.test-dist/src/utils/auth.js';
 import { generateHTML } from '../.test-dist/src/utils/templates.js';
-import { generatePropfindResponse, make_resource_path, InvalidResourcePathError } from '../.test-dist/src/utils/webdavUtils.js';
+import { generatePropfindResponse, make_resource_path, InvalidResourcePathError, listAll } from '../.test-dist/src/utils/webdavUtils.js';
 import { handleCorsPreflight } from '../.test-dist/src/utils/cors.js';
 import { handleWebDAV } from '../.test-dist/src/handlers/webdavHandler.js';
 
@@ -66,7 +66,7 @@ const envFor = (bucket) => ({ BUCKET: bucket, BUCKET_NAME: 'webdav' });
 
 test('OPTIONS advertises DAV Class 1 only and does not claim MOVE support', async () => {
   const response = await handleWebDAV(new Request('https://dav.example/', {method:'OPTIONS'}), envFor(mockBucket()));
-  assert.equal(response.headers.get('DAV'), '1');
+  assert.equal(response.headers.get('DAV'), null);
   assert.doesNotMatch(response.headers.get('Allow') || '', /MOVE|LOCK|UNLOCK/);
 });
 test('PROPFIND rejects Depth infinity instead of silently returning a shallow listing', async () => {
@@ -128,6 +128,40 @@ test('DELETE returns 404 for missing objects', async () => {
 test('conditional DELETE is rejected rather than silently ignoring If-Match', async () => {
   const bucket = mockBucket({head: async () => makeObject('file.txt')});
   const response = await handleWebDAV(new Request('https://dav.example/file.txt', {method:'DELETE',headers:{'If-Match':'"etag"'}}), envFor(bucket));
+  assert.equal(response.status, 501);
+  assert.equal(bucket.calls.length, 0);
+});
+
+test('R2 directory listing requests custom metadata and de-duplicates prefixes', async () => {
+  let receivedOptions;
+  const marker = makeObject('folder/', {resourcetype:'collection'});
+  const bucket = {
+    list: async (options) => {
+      receivedOptions = options;
+      return {objects:[marker],delimitedPrefixes:['folder/'],truncated:false};
+    },
+  };
+  const entries = [];
+  for await (const entry of listAll(bucket, '', 10)) entries.push(entry);
+  assert.deepEqual(receivedOptions.include, ['customMetadata']);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].key, 'folder/');
+  assert.equal(entries[0].isDirectory, true);
+  assert.ok(entries[0].object);
+});
+test('PROPFIND returns quoted HTTP ETag for WebDAV getetag property', async () => {
+  const bucket = mockBucket({head: async () => makeObject('file.txt')});
+  const response = await handleWebDAV(new Request('https://dav.example/file.txt', {method:'PROPFIND',headers:{Depth:'0'}}), envFor(bucket));
+  assert.equal(response.status, 207);
+  const xml = await response.text();
+  assert.match(xml, /<D:getetag>&quot;etag&quot;<\/D:getetag>/);
+});
+test('DELETE detects an implicit collection and refuses partial deletion', async () => {
+  const bucket = mockBucket({
+    head: async () => null,
+    list: async () => ({objects:[makeObject('folder/file.txt')],delimitedPrefixes:[],truncated:false}),
+  });
+  const response = await handleWebDAV(new Request('https://dav.example/folder', {method:'DELETE'}), envFor(bucket));
   assert.equal(response.status, 501);
   assert.equal(bucket.calls.length, 0);
 });

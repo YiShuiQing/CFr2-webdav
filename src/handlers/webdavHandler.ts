@@ -12,7 +12,6 @@ import { logger } from '../utils/logger.js';
 import { generateHTML } from '../utils/templates.js';
 import { WEBDAV_METHODS } from '../utils/cors.js';
 
-const DAV_CLASS = '1';
 const DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DEFAULT_MAX_LIST_ITEMS = 1000;
 
@@ -39,7 +38,7 @@ function downloadHeaders(object: R2Object, contentType: string): Headers {
   return new Headers({
     'Content-Type': contentType,
     'Content-Length': object.size.toString(),
-    ETag: object.etag,
+    ETag: object.httpEtag,
     'Last-Modified': object.uploaded.toUTCString(),
     'Content-Disposition': 'attachment',
     'X-Content-Type-Options': 'nosniff',
@@ -61,7 +60,7 @@ function errorResponse(status: number, message: string): Response {
 function handleOptions(): Response {
   return new Response(null, {
     status: 204,
-    headers: { Allow: WEBDAV_METHODS.join(', '), DAV: DAV_CLASS },
+    headers: { Allow: WEBDAV_METHODS.join(', ') },
   });
 }
 
@@ -91,7 +90,7 @@ export async function handleWebDAV(request: Request, env: Env): Promise<Response
       default:
         return new Response('Method Not Allowed', {
           status: 405,
-          headers: { Allow: WEBDAV_METHODS.join(', '), DAV: DAV_CLASS },
+          headers: { Allow: WEBDAV_METHODS.join(', ') },
         });
     }
   } catch (error) {
@@ -203,10 +202,14 @@ async function handleDelete(request: Request, bucket: R2Bucket): Promise<Respons
   }
 
   const object = await bucket.head(resourcePath);
-  if (!object) return errorResponse(404, 'Not Found');
-  if (resourcePath.endsWith('/') || object.customMetadata?.resourcetype === 'collection') {
+  const possibleCollectionPath = resourcePath.endsWith('/') ? resourcePath : `${resourcePath}/`;
+  const isCollection = resourcePath.endsWith('/') ||
+    object?.customMetadata?.resourcetype === 'collection' ||
+    (!object && await hasObjectsWithPrefix(bucket, possibleCollectionPath));
+  if (isCollection) {
     return errorResponse(501, 'Collection DELETE is not supported; no objects were deleted');
   }
+  if (!object) return errorResponse(404, 'Not Found');
 
   await bucket.delete(resourcePath);
   return new Response(null, { status: 204 });

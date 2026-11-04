@@ -5,8 +5,8 @@ export const WEBDAV_METHODS = [
 ];
 
 const ALLOWED_HEADERS = [
-  'Authorization', 'Content-Type', 'Depth', 'Overwrite', 'Destination', 'Range',
-  'If-Match', 'If-None-Match', 'Lock-Token', 'Timeout', 'Content-Language',
+  'Authorization', 'Content-Type', 'Depth', 'Overwrite', 'Destination',
+  'If-Match', 'If-None-Match',
 ];
 
 function configuredOrigins(env: Env): Set<string> {
@@ -49,7 +49,6 @@ export function handleCorsPreflight(request: Request, env: Env): Response | null
   const origin = request.headers.get('Origin');
   const headers = new Headers({
     Allow: WEBDAV_METHODS.join(', '),
-    DAV: '1, 2',
   });
 
   if (!origin) return new Response(null, { status: 204, headers });
