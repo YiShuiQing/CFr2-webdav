@@ -156,26 +156,24 @@ async function handlePut(request: Request, bucket: R2Bucket, env: Env): Promise<
 
   const limit = maxUploadBytes(env);
   const contentLength = request.headers.get('Content-Length');
+  let declaredLength: number | null = null;
   if (contentLength !== null) {
     if (!/^\d+$/.test(contentLength)) return errorResponse(400, 'Invalid Content-Length');
-    if (Number(contentLength) > limit) return errorResponse(413, 'Upload exceeds configured size limit');
+    declaredLength = Number(contentLength);
+    if (!Number.isSafeInteger(declaredLength)) return errorResponse(400, 'Invalid Content-Length');
+    if (declaredLength > limit) return errorResponse(413, 'Upload exceeds configured size limit');
   }
 
-  let exceeded = false;
-  const body = request.body
-    ? request.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-        transform(chunk, controller) {
-          totalBytes += chunk.byteLength;
-          if (totalBytes > limit) {
-            exceeded = true;
-            controller.error(new Error('Upload size limit exceeded'));
-            return;
-          }
-          controller.enqueue(chunk);
-        },
-      }))
-    : new Uint8Array();
-  let totalBytes = 0;
+  // R2 requires a known-length ReadableStream. Passing request.body directly
+  // preserves its request-body length metadata; wrapping it in TransformStream
+  // makes the stream length unknown and causes R2 put() to throw.
+  if (request.body && declaredLength === null) {
+    return errorResponse(411, 'Content-Length is required for streaming uploads');
+  }
+  if (!request.body && declaredLength !== null && declaredLength !== 0) {
+    return errorResponse(400, 'Request body is missing');
+  }
+  const body = request.body ?? new Uint8Array();
 
   try {
     const existing = await bucket.head(resourcePath);
@@ -186,8 +184,12 @@ async function handlePut(request: Request, bucket: R2Bucket, env: Env): Promise<
     if (!uploaded) return errorResponse(412, 'Upload precondition failed');
     return new Response(null, { status: existing ? 204 : 201 });
   } catch (error) {
-    if (exceeded) return errorResponse(413, 'Upload exceeds configured size limit');
-    logger.error('Upload failed:', error instanceof Error ? error.message : 'unknown error');
+    logger.error('Upload failed', {
+      contentLength: declaredLength,
+      error: error instanceof Error
+        ? { name: error.name, message: error.message, stack: error.stack }
+        : String(error),
+    });
     return errorResponse(500, 'Upload failed');
   }
 }
